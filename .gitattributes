@@ -1,0 +1,4 @@
+/src/** -text
+/Build.ps1 -text
+/notices/*.txt -text
+/notices/*third-party.md -text
