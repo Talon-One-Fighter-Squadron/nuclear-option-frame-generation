@@ -38,7 +38,7 @@ public sealed partial class NuclearDLSS
             File.Copy(path,tmp);
             File.AppendAllText(tmp,Environment.NewLine+key+"="+VulkanLibrary+Environment.NewLine,new UTF8Encoding(false));
             File.Replace(tmp,path,null);
-            return "Restart once using Steamâ€™s Vulkan option to enable FSR frame generation.";
+            return "Restart once using Steam's Vulkan option to enable FSR frame generation.";
         } catch(IOException){return "Could not update NuclearOption_Data/boot.config for Vulkan frame generation.";}
           catch(UnauthorizedAccessException){return "Vulkan setup needs write access to NuclearOption_Data/boot.config.";}
         finally {if(File.Exists(tmp))File.Delete(tmp);}

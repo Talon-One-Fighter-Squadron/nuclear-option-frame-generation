@@ -14,7 +14,7 @@ using UnityEngine.Rendering.Universal;
 using UnityEngine.LowLevel;
 using UnityEngine.Experimental.Rendering;
 
-[BepInPlugin("local.nuclearoption.dlss","Nuclear Option DLSS","0.5.0")]
+[BepInPlugin("local.nuclearoption.dlss","Nuclear Option DLSS","0.5.2")]
 [BepInProcess("NuclearOption.exe")]
 [DefaultExecutionOrder(-31000)]
 public sealed partial class NuclearDLSS : BaseUnityPlugin
@@ -129,7 +129,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
     RenderTexture color,depth,motion,output,urpOutput,hudless,final;
     static readonly Vector2 FlipY=new Vector2(1,-1), TopLeft=new Vector2(0,1);
     RTHandle outputHandle;
-    RenderTexture alternateHud; IntPtr alternateHudPtr;
+    RenderTexture alternateHud; IntPtr alternateHudPtr; int hudCaptureFrame=-1;
     RenderTexture prevColor,beforeCockpit,afterCockpit,cockpitDepth,cockpitMotion,mergedDepth,backwardMotion,ui;
     Frame frame,geometry;
     IntPtr colorPtr,depthPtr,motionPtr,outputPtr,hudPtr,finalPtr;
@@ -440,7 +440,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
             source=p.postOutput;
             if(p.frame.generated!=0) {
                 var cmd=(CommandBuffer)bufferField.GetValue(renderingData);
-                cmd.Blit(source.nameID,p.hudless,FlipY,TopLeft);
+                cmd.Blit(source.nameID,p.hudless,FlipY,TopLeft);p.hudCaptureFrame=Time.frameCount;
             }
         } else BuildScene(ref renderingData,ref source,false);
     }
@@ -487,7 +487,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         }else cmd.IssuePluginEventAndData(p.callback,p.first+1,Pack(ref p.frame));
         if(!p.vulkan)cmd.CopyTexture(p.color,p.prevColor);
         var scene=q==Quality.Off?p.color:(p.nativeFrame==index?p.detailed:p.output);
-        if(!early && p.frame.generated!=0) cmd.Blit(scene,p.hudless);
+        if(!early && p.frame.generated!=0){cmd.Blit(scene,p.hudless);p.hudCaptureFrame=index;}
         if(q!=Quality.Off) {cmd.Blit(scene,p.urpOutput,FlipY,TopLeft); source=p.outputHandle;}
         p.prevPos=tr.position;p.prevForward=tr.forward;p.previousProjection=p.projection;p.previousViewRotation=p.viewRotation;
         p.previousFov=cam.fieldOfView;p.previousJitter=new Vector2(-j.x,j.y);p.previousFrame=index;
@@ -504,7 +504,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
             if(state!=1) continue;
             if(Count!=0 && resolved==Time.frameCount && frame.generated!=0 && (vulkan || final)) {
                 if(!usingFsr) ScreenCapture.CaptureScreenshotIntoRenderTexture(final);
-                frame.hudless=hudPtr; frame.final=finalPtr;
+                frame.hudless=(!vulkan || hudCaptureFrame==Time.frameCount)?hudPtr:IntPtr.Zero; frame.final=finalPtr;
                 if(vulkan)Issue(0,PackVulkan(ref frame));else Issue(2,Pack(ref frame));
             } else if(!vulkan) Issue(4,(IntPtr)Time.frameCount);
         }
@@ -624,7 +624,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         int next=GUILayout.SelectionGrid(cur,new[]{"Off",FsrScaling?"Native AA":"DLAA","Quality","Balanced","Performance","Ultra Perf."},3);
         if(next>=0 && next!=cur) SelectQuality(next);
         GUI.enabled=state==1 && ActiveQuality!=Quality.Off;
-        if(GUI.enabled && color && output) GUILayout.Label("World render  "+color.width+" Ã— "+color.height+"  â†’  "+output.width+" Ã— "+output.height);
+        if(GUI.enabled && color && output) GUILayout.Label("World render  "+color.width+" x "+color.height+"  ->  "+output.width+" x "+output.height);
         GUI.enabled=GUI.enabled && !FsrScaling;
         bool force=GUILayout.Toggle(forceSecondGen.Value,"Force DLSS 4.5 model for all presets");
         if(force!=forceSecondGen.Value) forceSecondGen.Value=force;
@@ -639,7 +639,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         GUI.enabled=true;
         if(ProviderNote!=null)GUILayout.Label(ProviderNote);
         GUI.enabled=state==1 && max>=1;
-        bool enabled=GUILayout.Toggle(fg.Value,"Frame Generation"+(mfg.Value && max>1?"":" (2Ã—)"));
+        bool enabled=GUILayout.Toggle(fg.Value,mfg.Value && max>1?"Frame Generation":"2x Frame Generation");
         if(enabled!=fg.Value) fg.Value=enabled;
         GUI.enabled=state==1 && max>=1 && fg.Value && hasReflex;
         bool boost=GUILayout.Toggle(reflexBoost.Value,"NVIDIA Reflex On + Boost");
@@ -654,7 +654,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         GUI.enabled=GUI.enabled && !(dyn!=0 && dynamic.Value);
         GUILayout.BeginHorizontal();
         for(int i=3;i<=Math.Min(max+1,6);i++)
-            if(GUILayout.Toggle(i==multiplier.Value,i+"Ã—",GUI.skin.button) && i!=multiplier.Value) multiplier.Value=i;
+            if(GUILayout.Toggle(i==multiplier.Value,i+"x",GUI.skin.button) && i!=multiplier.Value) multiplier.Value=i;
         GUILayout.EndHorizontal(); GUI.enabled=true;
         bool rates=GUILayout.Toggle(fpsOverlay.Value,"Show FPS while flying");
         if(rates!=fpsOverlay.Value) fpsOverlay.Value=rates;

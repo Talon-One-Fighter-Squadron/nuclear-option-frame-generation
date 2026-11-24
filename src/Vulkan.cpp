@@ -29,6 +29,8 @@ ffxContext presentation{}, effect{};
 VkSwapchainKHR proxy{};
 VkExtent2D extent{};
 VkFormat format{};
+VkColorSpaceKHR colorSpace{};
+bool previousHudless{};
 ffxQueryDescSwapchainReplacementFunctionsVK swapFns{};
 bool active, prepared, skipOldDestroy;
 std::atomic<bool> supported{}, failed{};
@@ -51,16 +53,92 @@ struct Inputs {
 };
 uint64_t frameId;
 
-void report(const char* text) {
-    message.store(text);
+void trace(const char* text) {
     wchar_t game[MAX_PATH];
     if (!GetModuleFileNameW(nullptr,game,MAX_PATH)) return;
     auto path=std::filesystem::path(game).parent_path()/L"BepInEx"/L"NuclearVulkan.log";
     FILE* file=nullptr;
     if (!_wfopen_s(&file,path.c_str(),L"a")) { fprintf(file,"%s\n",text); fclose(file); }
 }
+void report(const char* text){message.store(text);trace(text);}
 template<class T> T inst(const char* name){return reinterpret_cast<T>(instanceProc(instance,name));}
 template<class T> T dev(VkDevice d,const char* name){return reinterpret_cast<T>(deviceProc(d,name));}
+
+// The interpolation shader samples an sRGB backbuffer in linear light. A
+// storage-image write does not perform the inverse conversion. Write linear
+// FP16 first, then let Vulkan encode into the actual sRGB presentation image.
+struct GeneratedColor {
+    VkImage image{};
+    VkDeviceMemory memory{};
+    bool initialized{};
+    PFN_vkCmdPipelineBarrier barrier{};
+    PFN_vkCmdBlitImage blit{};
+
+    void release(){
+        if(image)dev<PFN_vkDestroyImage>(device,"vkDestroyImage")(device,image,nullptr);
+        if(memory)dev<PFN_vkFreeMemory>(device,"vkFreeMemory")(device,memory,nullptr);
+        image={};memory={};initialized=false;
+    }
+    bool create(){
+        if(format!=VK_FORMAT_R8G8B8A8_SRGB && format!=VK_FORMAT_B8G8R8A8_SRGB)return true;
+        VkFormatProperties linear{},display{};
+        auto properties=inst<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
+        properties(physical,VK_FORMAT_R16G16B16A16_SFLOAT,&linear);properties(physical,format,&display);
+        const VkFormatFeatureFlags required=VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+        if((linear.optimalTilingFeatures&required)!=required || !(display.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT))return false;
+        VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        info.imageType=VK_IMAGE_TYPE_2D;info.format=VK_FORMAT_R16G16B16A16_SFLOAT;
+        info.extent={extent.width,extent.height,1};info.mipLevels=info.arrayLayers=1;info.samples=VK_SAMPLE_COUNT_1_BIT;
+        info.usage=VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if(dev<PFN_vkCreateImage>(device,"vkCreateImage")(device,&info,nullptr,&image)!=VK_SUCCESS)return false;
+        VkMemoryRequirements requirements{};
+        dev<PFN_vkGetImageMemoryRequirements>(device,"vkGetImageMemoryRequirements")(device,image,&requirements);
+        VkPhysicalDeviceMemoryProperties types{};
+        inst<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties")(physical,&types);
+        for(uint32_t i=0;i<types.memoryTypeCount;i++){
+            if(!(requirements.memoryTypeBits&(1u<<i)) || !(types.memoryTypes[i].propertyFlags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))continue;
+            VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,nullptr,requirements.size,i};
+            if(dev<PFN_vkAllocateMemory>(device,"vkAllocateMemory")(device,&alloc,nullptr,&memory)!=VK_SUCCESS)continue;
+            if(dev<PFN_vkBindImageMemory>(device,"vkBindImageMemory")(device,image,memory,0)!=VK_SUCCESS)break;
+            barrier=dev<PFN_vkCmdPipelineBarrier>(device,"vkCmdPipelineBarrier");
+            blit=dev<PFN_vkCmdBlitImage>(device,"vkCmdBlitImage");
+            return true;
+        }
+        release();return false;
+    }
+    static VkImageMemoryBarrier transition(VkImage target,VkImageLayout from,VkImageLayout to,VkAccessFlags reads,VkAccessFlags writes){
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask=reads;b.dstAccessMask=writes;b.oldLayout=from;b.newLayout=to;
+        b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        b.image=target;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};return b;
+    }
+    FfxApiResource writable(VkCommandBuffer command,const FfxApiResource& destination){
+        if(!initialized){
+            auto b=transition(image,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);
+            barrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,nullptr,0,nullptr,1,&b);
+        }
+        FfxApiResource resource=destination;
+        resource.resource=image;resource.description.format=FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
+        resource.description.usage=FFX_API_RESOURCE_USAGE_UAV;
+        return resource;
+    }
+    void encode(VkCommandBuffer command,VkImage target){
+        VkImageMemoryBarrier before[]={
+            transition(image,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT),
+            transition(target,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT)};
+        barrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,2,before);
+        VkImageBlit region{};region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+        region.srcOffsets[1]=region.dstOffsets[1]={int32_t(extent.width),int32_t(extent.height),1};
+        blit(command,image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,target,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,VK_FILTER_NEAREST);
+        VkImageMemoryBarrier after[]={
+            transition(image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT),
+            transition(target,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT)};
+        barrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,2,after);
+        initialized=true;
+    }
+} generatedColor;
+
+
 
 VkResult VKAPI_CALL createInstance(const VkInstanceCreateInfo* original,const VkAllocationCallbacks* alloc,VkInstance* out) {
     auto create=reinterpret_cast<PFN_vkCreateInstance>(instanceProc(nullptr,"vkCreateInstance"));
@@ -189,6 +267,7 @@ void releaseEffect() {
         api.Dispatch(&presentation,&wait.header);
     }
     if(effect){dev<PFN_vkDeviceWaitIdle>(device,"vkDeviceWaitIdle")(device);api.DestroyContext(&effect,nullptr);effect=nullptr;}
+    generatedColor.release();
 }
 VkResult VKAPI_CALL createSwap(VkDevice d,const VkSwapchainCreateInfoKHR* info,const VkAllocationCallbacks* alloc,VkSwapchainKHR* out) {
     auto fallback=[&](){return dev<PFN_vkCreateSwapchainKHR>(d,"vkCreateSwapchainKHR")(d,info,alloc,out);};
@@ -198,7 +277,7 @@ VkResult VKAPI_CALL createSwap(VkDevice d,const VkSwapchainCreateInfoKHR* info,c
         if(info->oldSwapchain!=proxy) return fallback();
         releaseEffect();
         auto result=swapFns.pOutCreateSwapchainFFXAPI(d,info,alloc,out,proxy);
-        if(result==VK_SUCCESS){extent=info->imageExtent;format=info->imageFormat;skipOldDestroy=true;lastCount=swapFns.pOutGetLastPresentCountFFXAPI(proxy);}
+        if(result==VK_SUCCESS){extent=info->imageExtent;format=info->imageFormat;colorSpace=info->imageColorSpace;skipOldDestroy=true;lastCount=swapFns.pOutGetLastPresentCountFFXAPI(proxy);}
         return result;
     }
     if(info->oldSwapchain || ffxApiGetSurfaceFormatVK(info->imageFormat)==FFX_API_SURFACE_FORMAT_UNKNOWN) return fallback();
@@ -225,7 +304,10 @@ VkResult VKAPI_CALL createSwap(VkDevice d,const VkSwapchainCreateInfoKHR* info,c
     if(api.CreateContext(&presentation,&sc.header,nullptr)!=FFX_API_RETURN_OK){report("AMD Vulkan swapchain creation failed");return fallback();}
     swapFns={{FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK}};
     if(api.Query(&presentation,&swapFns.header)!=FFX_API_RETURN_OK){report("AMD Vulkan swapchain functions unavailable");return VK_ERROR_INITIALIZATION_FAILED;}
-    extent=info->imageExtent;format=info->imageFormat;lastCount=0;failed=false;
+    extent=info->imageExtent;format=info->imageFormat;colorSpace=info->imageColorSpace;lastCount=0;failed=false;
+    char details[96];
+    sprintf_s(details,"Vulkan swapchain format=%d colorSpace=%d",int(format),int(colorSpace));
+    trace(details);
     *out=proxy;supported=true;report("Vulkan FSR 2x ready");return VK_SUCCESS;
 }
 void VKAPI_CALL destroySwap(VkDevice d,VkSwapchainKHR chain,const VkAllocationCallbacks* alloc) {
@@ -300,7 +382,11 @@ PFN_vkVoidFunction VKAPI_CALL getInstanceProc(VkInstance i,const char* name){
 PFN_vkGetInstanceProcAddr UNITY_INTERFACE_API initialize(PFN_vkGetInstanceProcAddr next,void*){instanceProc=next;return getInstanceProc;}
 ffxReturnCode_t interpolate(ffxDispatchDescFrameGeneration* desc,void*){
     std::lock_guard<std::mutex> guard(dispatchLock);
-    auto result=api.Dispatch(&effect,&desc->header);
+    auto command=static_cast<VkCommandBuffer>(desc->commandList);
+    auto request=*desc;
+    if(generatedColor.image)request.outputs[0]=generatedColor.writable(command,desc->outputs[0]);
+    auto result=api.Dispatch(&effect,&request.header);
+    if(result==FFX_API_RETURN_OK && generatedColor.image)generatedColor.encode(command,static_cast<VkImage>(desc->outputs[0].resource));
     if(result==FFX_API_RETURN_OK)++dispatches;
     else failed=true;
     return result;
@@ -311,12 +397,17 @@ bool ensureEffect(){
     auto id=findProvider(FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION,"3.1.6");
     if(!id){failed=true;report("AMD Vulkan FSR 3.1 interpolation unavailable");return false;}
     ffxOverrideVersion select{{FFX_API_DESC_TYPE_OVERRIDE_VERSION,&backend.header},id};
-    ffxCreateContextDescFrameGenerationHudless hud{{FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_HUDLESS,&select.header},FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM};
-    ffxCreateContextDescFrameGenerationVersion abi{{FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION,&hud.header},FFX_FRAMEGENERATION_VERSION};
+    ffxCreateContextDescFrameGenerationVersion abi{{FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION,&select.header},FFX_FRAMEGENERATION_VERSION};
     FfxApiDimensions2D size{extent.width,extent.height};
     ffxCreateContextDescFrameGeneration create{{FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION,&abi.header},
         FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED,size,size,ffxApiGetSurfaceFormatVK(format)};
-    if(api.CreateContext(&effect,&create.header,nullptr)==FFX_API_RETURN_OK){report("Vulkan FSR interpolation context ready");return true;}
+    if(api.CreateContext(&effect,&create.header,nullptr)==FFX_API_RETURN_OK){
+        if(generatedColor.create()){
+            report(generatedColor.image?"Vulkan FSR ready (sRGB output)":"Vulkan FSR interpolation context ready");
+            return true;
+        }
+        api.DestroyContext(&effect,nullptr);effect=nullptr;failed=true;report("sRGB frame-generation output unavailable");return false;
+    }
     failed=true;report("AMD Vulkan interpolation context unavailable");return false;
 }
 bool accessImage(void* texture,FfxApiResource& resource,bool write=false){
@@ -352,18 +443,25 @@ void UNITY_INTERFACE_API render(int id,void* data){
     if(id==eventBase+1){ensureEffect();return;}
     if(!input || !ensureEffect())return;
     auto& f=*input;
-    if(f.width>extent.width || f.height>extent.height || !f.width || !f.height)return;
+    if(f.outWidth!=extent.width || f.outHeight!=extent.height || !f.width || !f.height ||
+       f.width>extent.width || f.height>extent.height)return;
     ffxDispatchDescFrameGenerationPrepareV2 prep{{FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2}};
     ffxConfigureDescFrameGeneration config{{FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION}};
-    if(!accessImage(f.depth,prep.depth) || !accessImage(f.motion,prep.motionVectors) || !accessImage(f.hudless,config.HUDLessColor))return;
+    if(!accessImage(f.depth,prep.depth) || !accessImage(f.motion,prep.motionVectors))return;
+    // The default history format is the actual backbuffer format. An optional
+    // HUD-free image can be used without reinterpreting its Vulkan image view.
+    FfxApiResource hud{};
+    if(colorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && f.hudless && accessImage(f.hudless,hud) &&
+       hud.description.width==extent.width && hud.description.height==extent.height &&
+       hud.description.format==ffxApiGetSurfaceFormatVK(format))config.HUDLessColor=hud;
+    bool hudless=config.HUDLessColor.resource!=nullptr;
     UnityVulkanRecordingState recording{};
     if(!unity->CommandRecordingState(&recording,kUnityVulkanGraphicsQueueAccess_DontCare) || !recording.commandBuffer)return;
     prep.commandList=recording.commandBuffer;prep.frameID=++frameId;prep.renderSize={f.width,f.height};
     prep.motionVectorScale={-float(f.width),float(f.height)};
-    prep.jitterOffset={f.jitterX,f.jitterY};prep.reset=!active || f.reset; prep.frameTimeDelta=f.deltaMs;prep.cameraNear=f.nearZ;prep.cameraFar=f.farZ;
+    prep.jitterOffset={f.jitterX,f.jitterY};prep.reset=!active || f.reset || previousHudless!=hudless; prep.frameTimeDelta=f.deltaMs;prep.cameraNear=f.nearZ;prep.cameraFar=f.farZ;
     prep.cameraFovAngleVertical=f.fov;prep.viewSpaceToMetersFactor=1;
     memcpy(prep.cameraPosition,f.position,12);memcpy(prep.cameraUp,f.up,12);memcpy(prep.cameraRight,f.right,12);memcpy(prep.cameraForward,f.forward,12);
-    config.HUDLessColor.description.format=FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
     config.swapChain=proxy;config.frameID=prep.frameID;config.frameGenerationEnabled=true;
     config.generationRect={0,0,int(extent.width),int(extent.height)};
     config.frameGenerationCallback=interpolate;
@@ -371,7 +469,7 @@ void UNITY_INTERFACE_API render(int id,void* data){
     active=true;
     std::lock_guard<std::mutex> dispatch(dispatchLock);
     if(api.Dispatch(&effect,&prep.header)!=FFX_API_RETURN_OK){failed=true;report("Vulkan FSR prepare failed");return;}
-    prepared=true;
+    previousHudless=hudless;prepared=true;
 }
 void attach(IUnityInterfaces* api){
     unity=api->Get<IUnityGraphicsVulkan>();

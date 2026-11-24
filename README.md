@@ -5,8 +5,8 @@ Adds FSR 3.1 temporal upscaling and 2× frame generation to Nuclear Option on Vu
 ## Install
 
 1. Close Nuclear Option. In your Steam library, right-click the game and choose **Manage → Browse local files**.
-2. Install **BepInEx 5 for Windows x64** in that folder if you haven't already. Version 5.4.23.5 was used for testing. [BepInEx download](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5)
-3. Extract the mod ZIP directly beside `NuclearOption.exe`. Allow the `BepInEx` and `NuclearOption_Data` folders to merge. FSR 2× is included. For DLSS, Reflex or Multi Frame Generation, add NVIDIA’s runtime as described below before starting the game. [Download the mod ZIP](https://github.com/Talon-One-Fighter-Squadron/nuclear-option-frame-generation/releases/download/v0.5.0/NuclearOption-FrameGeneration-0.5.0-win-x64.zip)
+2. If this is a fresh install, extract **BepInEx 5.4.23.5 for Windows x64** here first. You should see `winhttp.dll` beside `NuclearOption.exe`. [Download BepInEx for Windows x64](https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x64_5.4.23.5.zip)
+3. Extract the mod ZIP directly beside `NuclearOption.exe`. Allow the `BepInEx` and `NuclearOption_Data` folders to merge. FSR 2× is included. For DLSS, Reflex or Multi Frame Generation, add NVIDIA’s runtime as described below before starting the game. [Public releases](https://github.com/Talon-One-Fighter-Squadron/nuclear-option-frame-generation/releases)
 4. Choose **Vulkan** or **DirectX 12** in Steam. On the first Vulkan launch the mod adds its graphics startup entry to `NuclearOption_Data/boot.config`. Restart once with the same Steam option to activate Vulkan frame generation. A game update that replaces that file may require the same restart.
 5. Open **Settings → Graphics**. Select **AMD FSR 3.1** under **Upscaler**, then choose **Quality**, **Balanced**, **Performance**, **Ultra Performance** or **Native AA**. **Off** keeps the game’s own resolution. Toggle **Frame Generation** separately for 2× output. **F8** opens the same controls in flight.
 
@@ -72,7 +72,7 @@ Use a Windows x64 installation of Nuclear Option with BepInEx 5, Visual Studio C
 .\Pack.ps1
 ```
 
-The [dependency notes](notices/README.md) link to the exact SDK releases. This build targets Nuclear Option 0.34.6. Vulkan startup and AMD swapchain initialization were checked on a GeForce RTX 5080. The new upscaling presets and combined output have not been verified in flight or on Radeon hardware. Game updates can change the rendering hooks.
+The [dependency notes](notices/README.md) link to the exact SDK releases. This build targets Nuclear Option 0.34.6. Game updates can change the rendering hooks.
 
 ## Game credit
 
