@@ -14,7 +14,7 @@ using UnityEngine.Rendering.Universal;
 using UnityEngine.LowLevel;
 using UnityEngine.Experimental.Rendering;
 
-[BepInPlugin("local.nuclearoption.dlss","Nuclear Option DLSS","0.4.2")]
+[BepInPlugin("local.nuclearoption.dlss","Nuclear Option DLSS","0.5.0")]
 [BepInProcess("NuclearOption.exe")]
 [DefaultExecutionOrder(-31000)]
 public sealed partial class NuclearDLSS : BaseUnityPlugin
@@ -52,21 +52,38 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
     enum Quality { Off=0, Performance=1, Balanced=2, Quality=3, UltraPerformance=4, DLAA=6 }
     static readonly Quality[] modes={Quality.Off,Quality.DLAA,Quality.Quality,Quality.Balanced,Quality.Performance,Quality.UltraPerformance};
     static NuclearDLSS self;
+    enum FsrPreset {Off=0,Performance=1,Balanced=2,Quality=3,UltraPerformance=4,NativeAA=6}
     ConfigEntry<Quality> quality;
+    ConfigEntry<FsrPreset> fsrQuality;
+    ConfigEntry<bool> preferFsrScaling;
+    bool HasDlssScaling {get{return (features&AdapterFeatures.DLSSSuperResolution)!=0;}}
+    bool HasFsrScaling {get{return (features&AdapterFeatures.FsrScaling)!=0;}}
+    bool FsrScaling {get{return HasFsrScaling && (!HasDlssScaling || preferFsrScaling.Value);}}
+    bool NativePanelEnabled {get{return !vulkan && nativePanel.Value;}}
+    void SelectQuality(int index){
+        if(index<0 || index>=modes.Length)return;
+        if(FsrScaling)fsrQuality.Value=(FsrPreset)modes[index];else quality.Value=modes[index];
+    }
+    static bool FsrSize(Quality mode,int width,int height,out int w,out int h){
+        float scale=mode==Quality.Quality?1.5f:mode==Quality.Balanced?1.7f:mode==Quality.Performance?2f:mode==Quality.UltraPerformance?3f:1f;
+        w=Math.Max(1,(int)(width/scale));h=Math.Max(1,(int)(height/scale));
+        return mode!=Quality.Off && width>0 && height>0;
+    }
     ConfigEntry<bool> fg,mfg,dynamic,nativePanel,forceSecondGen,reflexBoost;
     ConfigEntry<bool> capToRefresh;
     // Bits shared with Bridge.cpp, queried from Unity's actual D3D12 adapter.
-    [Flags] enum AdapterFeatures {Detected=1, DLSSSuperResolution=2, DLSSFrameGeneration=4}
+    [Flags] enum AdapterFeatures {Detected=1, DLSSSuperResolution=2, DLSSFrameGeneration=4,FsrScaling=32}
     AdapterFeatures features;
     ConfigEntry<string> provider;
     string startupPreference;
-    bool CanUpscale {get{return (features&AdapterFeatures.DLSSSuperResolution)!=0;}}
+    bool CanUpscale {get{return HasDlssScaling || HasFsrScaling;}}
     bool CanSelectDLSS {get{return (features&AdapterFeatures.DLSSFrameGeneration)!=0;}}
-    Quality ActiveQuality {get{return CanUpscale?quality.Value:Quality.Off;}}
+    Quality ActiveQuality {get{return FsrScaling?(Quality)fsrQuality.Value:HasDlssScaling?quality.Value:Quality.Off;}}
     int ProviderIndex(string preference) {return FrameGenerationProvider.Index(preference,CanSelectDLSS);}
     bool usingFsr,hasReflex,fsrWarmRequested;
     static readonly string[] providers=FrameGenerationProvider.Names;
     string ProviderNote {get{
+        if(vulkan)return status;
         if(state!=1) return null;
         if(ProviderIndex(provider.Value)!=ProviderIndex(startupPreference)) return "Restart Nuclear Option to use "+providers[ProviderIndex(provider.Value)]+".";
         if(max<1) return usingFsr?status:"Frame generation unavailable on this GPU or driver";
@@ -112,6 +129,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
     RenderTexture color,depth,motion,output,urpOutput,hudless,final;
     static readonly Vector2 FlipY=new Vector2(1,-1), TopLeft=new Vector2(0,1);
     RTHandle outputHandle;
+    RenderTexture alternateHud; IntPtr alternateHudPtr;
     RenderTexture prevColor,beforeCockpit,afterCockpit,cockpitDepth,cockpitMotion,mergedDepth,backwardMotion,ui;
     Frame frame,geometry;
     IntPtr colorPtr,depthPtr,motionPtr,outputPtr,hudPtr,finalPtr;
@@ -130,6 +148,8 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
     {
         self=this;
         quality=Config.Bind("Graphics","SuperResolution",Quality.DLAA,"DLSS Super Resolution quality");
+        preferFsrScaling=Config.Bind("Graphics","PreferFSRUpscaler",false,"Use AMD FSR 3.1 when both upscalers are available");
+        fsrQuality=Config.Bind("Graphics","FSRSuperResolution",FsrPreset.Off,"FSR 3.1 temporal upscaling quality");
         fpsOverlay=Config.Bind("Display","ShowFPS",false,"Show Unity rendered FPS and the active provider's presentation rate during gameplay");
         forceSecondGen=Config.Bind("Graphics","ForceSecondGenerationModel",false,"Request model M for DLAA through Performance and model L for Ultra Performance");
         nativePanel=Config.Bind("Graphics","NativeInstruments",true,"Draw cockpit geometry and instrument markings at display resolution");
@@ -144,16 +164,17 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         dynamic=Config.Bind("Graphics","DynamicMultiplier",false,"Let NVIDIA choose the multiplier");
         multiplier=Config.Bind("Graphics","Multiplier",3,new ConfigDescription("Total displayed frames per rendered frame",new AcceptableValueRange<int>(3,6)));
         InstallGraphicsMenu();
-        if(SystemInfo.graphicsDeviceType!=GraphicsDeviceType.Direct3D12) {
-            status=SystemInfo.graphicsDeviceType+" active. Restart with -force-d3d12.";
-            Logger.LogInfo(status);return;
+        vulkan=SystemInfo.graphicsDeviceType==GraphicsDeviceType.Vulkan;
+        if(!vulkan && SystemInfo.graphicsDeviceType!=GraphicsDeviceType.Direct3D12) {
+            status=SystemInfo.graphicsDeviceType+" active. Select Vulkan or DirectX 12 in Steam.";Logger.LogInfo(status);return;
         }
         try {
-            string dir=Path.Combine(Path.GetDirectoryName(Info.Location),"Runtime");
-            if(!File.Exists(Path.Combine(Application.dataPath,"Plugins","x86_64","NuclearDLSSBridge.dll")))
-                throw new FileNotFoundException("Install NuclearDLSSBridge.dll in NuclearOption_Data/Plugins/x86_64.");
-            callback=Setup(dir,Paths.BepInExRootPath,out first);
-            if(callback==IntPtr.Zero) throw new InvalidOperationException("Unity D3D12 v7 plug-in interface unavailable");
+            if(vulkan){if(!StartVulkan())return;}
+            else{
+                string dir=Path.Combine(Path.GetDirectoryName(Info.Location),"Runtime");
+                callback=Setup(dir,Paths.BepInExRootPath,out first);
+                if(callback==IntPtr.Zero)throw new InvalidOperationException("Unity D3D12 v7 plug-in interface unavailable");
+            }
             patches=new Harmony("local.nuclearoption.dlss");
             Hook(typeof(UniversalRenderPipeline),"InitializeCameraData","SizeBegin","SizeDescriptor","SizeEnd");
             Hook(typeof(UniversalRenderPipelineAsset),"get_renderScale",null,"Scale");
@@ -164,9 +185,11 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
             patches.Patch(shaderVariables,postfix:HM("WorldMipBias"));
             Hook(AccessTools.TypeByName("UnityEngine.Rendering.Universal.PostProcessPass"),"Render","BeforePost",null,"RestorePost");
             Hook(AccessTools.TypeByName("UnityEngine.Rendering.Universal.Internal.FinalBlitPass"),"ExecutePass","Resolve");
-            RenderPipelineManager.beginFrameRendering+=RenderStart;
-            earlyReflex=SetReflexLoop(true);
-            Issue(0,IntPtr.Zero);
+            if(!vulkan){
+                RenderPipelineManager.beginFrameRendering+=RenderStart;
+                earlyReflex=SetReflexLoop(true);
+                Issue(0,IntPtr.Zero);
+            }
             StartCoroutine(EndFrames());
         } catch(Exception e) {status=e.GetBaseException().Message; Logger.LogError(e); callback=IntPtr.Zero; if(patches!=null) patches.UnpatchSelf();}
     }
@@ -214,9 +237,9 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         if(!Active || renderingData.cameraData.camera.targetTexture || renderingData.cameraData.camera.cameraType!=CameraType.Game) return;
         if(renderingData.cameraData.renderType==CameraRenderType.Base && Scene(renderingData.cameraData.camera))
             __instance.EnqueuePass(self.pass);
-        else if(renderingData.cameraData.renderType==CameraRenderType.Overlay && renderingData.cameraData.camera.name=="cockpitRenderer" && self.baseFrame==Time.frameCount) {
+        else if(!self.vulkan && renderingData.cameraData.renderType==CameraRenderType.Overlay && renderingData.cameraData.camera.name=="cockpitRenderer" && self.baseFrame==Time.frameCount) {
             __instance.EnqueuePass(self.beforePass); __instance.EnqueuePass(self.afterPass);
-            if(self.nativePanel.Value && self.ActiveQuality!=Quality.Off) __instance.EnqueuePass(self.panelPass);
+            if(self.NativePanelEnabled && self.ActiveQuality!=Quality.Off) __instance.EnqueuePass(self.panelPass);
         }
         if(renderingData.cameraData.renderType==CameraRenderType.Overlay && renderingData.cameraData.resolveFinalTarget && self.baseFrame==Time.frameCount)
             __instance.EnqueuePass(self.finalPass);
@@ -318,7 +341,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
     }
     void Targets(int w,int h,int ow,int oh) {
         if(color && color.width==w && color.height==h && output.width==ow && output.height==oh) {
-            if(!nativeDraw && ActiveQuality!=Quality.Off && nativePanel.Value) CreatePanelTargets(w,h,ow,oh);
+            if(!nativeDraw && ActiveQuality!=Quality.Off && NativePanelEnabled) CreatePanelTargets(w,h,ow,oh);
             return;
         }
         Release();
@@ -331,9 +354,11 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         postColor=Tex(ow,oh,GraphicsFormat.R16G16B16A16_SFloat,"display post-process");
         postOutput=RTHandles.Alloc(postColor);
         hudless=Tex(ow,oh,GraphicsFormat.R8G8B8A8_SRGB,"HUD-less SDR");
-        final=Tex(ow,oh,GraphicsFormat.R8G8B8A8_SRGB,"display SDR");
+        if(vulkan)alternateHud=Tex(ow,oh,GraphicsFormat.R8G8B8A8_SRGB,"second HUD-less frame");
+        else final=Tex(ow,oh,GraphicsFormat.R8G8B8A8_SRGB,"display SDR");
         colorPtr=color.GetNativeTexturePtr(); depthPtr=depth.GetNativeTexturePtr(); motionPtr=motion.GetNativeTexturePtr();
-        outputPtr=output.GetNativeTexturePtr(); hudPtr=hudless.GetNativeTexturePtr(); finalPtr=final.GetNativeTexturePtr();
+        outputPtr=output.GetNativeTexturePtr(); hudPtr=hudless.GetNativeTexturePtr(); finalPtr=final?final.GetNativeTexturePtr():IntPtr.Zero;
+        if(vulkan){alternateHudPtr=alternateHud.GetNativeTexturePtr();previousFrame=-2;return;}
         var rgba=GraphicsFormat.R16G16B16A16_SFloat; var rg=GraphicsFormat.R16G16_SFloat; var r=GraphicsFormat.R32_SFloat;
         prevColor=Tex(w,h,rgba,"previous color");
         beforeCockpit=Tex(w,h,rgba,"world before cockpit"); afterCockpit=Tex(w,h,rgba,"world with cockpit");
@@ -345,7 +370,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
             cockpitDepth=cockpitDepth.GetNativeTexturePtr(),cockpitMotion=cockpitMotion.GetNativeTexturePtr(),
             mergedDepth=mergedDepth.GetNativeTexturePtr(),backwardMotion=backwardMotion.GetNativeTexturePtr(),
             ui=ui.GetNativeTexturePtr()};
-        if(ActiveQuality!=Quality.Off && nativePanel.Value) CreatePanelTargets(w,h,ow,oh);
+        if(ActiveQuality!=Quality.Off && NativePanelEnabled) CreatePanelTargets(w,h,ow,oh);
         previousFrame=-2;
     }
     void CreatePanelTargets(int w,int h,int ow,int oh) {
@@ -367,8 +392,8 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         if(postOutput!=null){postOutput.Release();postOutput=null;}
         if(postColor) Destroy(postColor);
         if(outputHandle!=null){outputHandle.Release();outputHandle=null;}
-        foreach(var t in new[]{color,depth,motion,output,urpOutput,hudless,final,prevColor,beforeCockpit,afterCockpit,cockpitDepth,cockpitMotion,mergedDepth,backwardMotion,ui,nativeDraw,nativeCockpit,detailed,coverage,worldInput,worldMotion}) if(t) Destroy(t);
-        color=depth=motion=output=urpOutput=hudless=final=null;
+        foreach(var t in new[]{alternateHud,color,depth,motion,output,urpOutput,hudless,final,prevColor,beforeCockpit,afterCockpit,cockpitDepth,cockpitMotion,mergedDepth,backwardMotion,ui,nativeDraw,nativeCockpit,detailed,coverage,worldInput,worldMotion}) if(t) Destroy(t);
+        alternateHud=color=depth=motion=output=urpOutput=hudless=final=null;
         nativeDraw=nativeCockpit=detailed=coverage=worldInput=worldMotion=null;
     }
     // Run the game's own post-process using its explicit source/destination path.
@@ -431,7 +456,8 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
             Vector3.Distance(tr.position,p.prevPos)>100 || Vector3.Dot(tr.forward,p.prevForward)<0.7f || Mathf.Abs(cam.fieldOfView-p.previousFov)>3;
         int flags=(p.forceSecondGen.Value?1:0)|(early?2:0)|(QualitySettings.vSyncCount>0?4:0);
         if(p.nativeFrame==index) flags|=8;
-        reset|=(flags&11)!=(p.lastFlags&11);
+        if(p.FsrScaling)flags|=16;
+        reset|=(flags&27)!=(p.lastFlags&27);
         // Relative translation avoids subtracting two large world-space projection matrices near a floating-origin shift.
         var delta=reset?Matrix4x4.identity:p.previousProjection*p.previousViewRotation*Matrix4x4.Translate(tr.position-p.prevPos)*p.viewRotation.inverse*p.projection.inverse;
         var j=q!=Quality.Off && p.sampleFrame==index && p.sampleCamera==cam.GetInstanceID()?p.frameJitter:Vector2.zero;
@@ -454,8 +480,12 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         // Normalize the URP intermediates to the DXGI scanout orientation before NGX sees them.
         cmd.Blit(source.nameID,p.color,FlipY,TopLeft);
         if(q!=Quality.Off) cmd.Blit(source.nameID,p.output,FlipY,TopLeft); // Fallback on an NGX error.
-        cmd.IssuePluginEventAndData(p.callback,p.first+1,Pack(ref p.frame));
-        cmd.CopyTexture(p.color,p.prevColor);
+        if(p.vulkan){
+            if(q!=Quality.Off)cmd.IssuePluginEventAndData(p.callback,p.first+2,p.PackVulkan(ref p.frame));
+            var old=p.hudless;p.hudless=p.alternateHud;p.alternateHud=old;
+            var ptr=p.hudPtr;p.hudPtr=p.alternateHudPtr;p.alternateHudPtr=ptr;
+        }else cmd.IssuePluginEventAndData(p.callback,p.first+1,Pack(ref p.frame));
+        if(!p.vulkan)cmd.CopyTexture(p.color,p.prevColor);
         var scene=q==Quality.Off?p.color:(p.nativeFrame==index?p.detailed:p.output);
         if(!early && p.frame.generated!=0) cmd.Blit(scene,p.hudless);
         if(q!=Quality.Off) {cmd.Blit(scene,p.urpOutput,FlipY,TopLeft); source=p.outputHandle;}
@@ -472,15 +502,16 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         while(true) {
             yield return end;
             if(state!=1) continue;
-            if(Count!=0 && resolved==Time.frameCount && frame.generated!=0 && final) {
+            if(Count!=0 && resolved==Time.frameCount && frame.generated!=0 && (vulkan || final)) {
                 if(!usingFsr) ScreenCapture.CaptureScreenshotIntoRenderTexture(final);
                 frame.hudless=hudPtr; frame.final=finalPtr;
-                Issue(2,Pack(ref frame));
-            } else Issue(4,(IntPtr)Time.frameCount);
+                if(vulkan)Issue(0,PackVulkan(ref frame));else Issue(2,Pack(ref frame));
+            } else if(!vulkan) Issue(4,(IntPtr)Time.frameCount);
         }
     }
     void Update() {
         if(Input.GetKeyDown(KeyCode.F8)) SetMenu(!show);
+        if(vulkan){VulkanUpdate();return;}
         if(callback==IntPtr.Zero) return;
         int before=state; Status(out state,out max,out dyn,out presented,out evals,statusText,statusText.Capacity);status=statusText.ToString();
         features=(AdapterFeatures)GetAdapterFeatures();
@@ -495,10 +526,10 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
             fsrWarmRequested=warmFsr;
             if(w>0 && h>0 && (displayW!=w || displayH!=h)) {
                 displayW=w;displayH=h;
-                if(CanUpscale) Issue(5,(IntPtr)(((long)w<<32)|(uint)h));
+                if(HasDlssScaling) Issue(5,(IntPtr)(((long)w<<32)|(uint)h));
             }
             sizedMode=ActiveQuality;
-            sizeReady=CanUpscale && OptimalSize((int)sizedMode,w,h,out optimalW,out optimalH)!=0;
+            sizeReady=FsrScaling?FsrSize(sizedMode,w,h,out optimalW,out optimalH):HasDlssScaling && OptimalSize((int)sizedMode,w,h,out optimalW,out optimalH)!=0;
         }
         if(fpsOverlay.Value && state==1) UpdateRates();
         else rateStart=0;
@@ -566,17 +597,17 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         bool reset=rateStart==0 || rateMode!=mode || rateQuality!=ActiveQuality;
         double elapsed=now-rateStart;
         if(!reset && elapsed<1) return;
-        ulong total=TotalPresents();
+        ulong total=vulkan?vkTotal:TotalPresents();
         if(reset || elapsed>3) fpsText="";
         else {
             double rendered=(Time.frameCount-rateFrame)/elapsed;
             fpsText="Game  "+rendered.ToString("F0")+" FPS";
-            if(mode!=0) fpsText+=(usingFsr?"    DXGI  ":"    Streamline  ")+((total-ratePresents)/elapsed).ToString("F0")+" presents/s";
+            if(mode!=0) fpsText+=(vulkan?"    Vulkan  ":usingFsr?"    DXGI  ":"    Streamline  ")+((total-ratePresents)/elapsed).ToString("F0")+" presents/s";
         }
         rateStart=now;rateFrame=Time.frameCount;ratePresents=total;rateMode=mode;rateQuality=ActiveQuality;
     }
     void OnGUI() {
-        if(show) menu=GUILayout.Window(0x44534e,menu,Draw,"Nuclear Option DLSS 4.5",GUILayout.Width(345));
+        if(show) menu=GUILayout.Window(0x44534e,menu,Draw,"Nuclear Option Graphics",GUILayout.Width(345));
         else if(fpsOverlay!=null && fpsOverlay.Value && fpsText.Length>0)
             GUI.Box(new Rect(12,12,310,26),fpsText);
     }
@@ -584,13 +615,20 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         GUILayout.Label(status);
         GUI.enabled=state==1 && CanUpscale;
         GUILayout.Label("Super Resolution");
+        GUI.enabled=state==1 && HasDlssScaling && HasFsrScaling;
+        int scaler=FsrScaling?1:0;
+        int selectedScaler=GUILayout.SelectionGrid(scaler,new[]{"DLSS","FSR 3.1"},2);
+        if(selectedScaler>=0 && selectedScaler!=scaler)preferFsrScaling.Value=selectedScaler==1;
+        GUI.enabled=state==1 && CanUpscale;
         int cur=Array.IndexOf(modes,ActiveQuality);
-        int next=GUILayout.SelectionGrid(cur,new[]{"Off","DLAA","Quality","Balanced","Performance","Ultra Perf."},3);
-        if(next>=0 && next!=cur) quality.Value=modes[next];
+        int next=GUILayout.SelectionGrid(cur,new[]{"Off",FsrScaling?"Native AA":"DLAA","Quality","Balanced","Performance","Ultra Perf."},3);
+        if(next>=0 && next!=cur) SelectQuality(next);
         GUI.enabled=state==1 && ActiveQuality!=Quality.Off;
-        if(GUI.enabled && color && output) GUILayout.Label("World render  "+color.width+" × "+color.height+"  →  "+output.width+" × "+output.height);
+        if(GUI.enabled && color && output) GUILayout.Label("World render  "+color.width+" Ã— "+color.height+"  â†’  "+output.width+" Ã— "+output.height);
+        GUI.enabled=GUI.enabled && !FsrScaling;
         bool force=GUILayout.Toggle(forceSecondGen.Value,"Force DLSS 4.5 model for all presets");
         if(force!=forceSecondGen.Value) forceSecondGen.Value=force;
+        GUI.enabled=state==1 && !vulkan && ActiveQuality!=Quality.Off;
         bool native=GUILayout.Toggle(nativePanel.Value,"Native-resolution instruments");
         if(nativePanel.Value!=native)nativePanel.Value=native;
         GUI.enabled=state==1 && CanSelectDLSS;
@@ -601,7 +639,7 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         GUI.enabled=true;
         if(ProviderNote!=null)GUILayout.Label(ProviderNote);
         GUI.enabled=state==1 && max>=1;
-        bool enabled=GUILayout.Toggle(fg.Value,"Frame Generation"+(mfg.Value && max>1?"":" (2×)"));
+        bool enabled=GUILayout.Toggle(fg.Value,"Frame Generation"+(mfg.Value && max>1?"":" (2Ã—)"));
         if(enabled!=fg.Value) fg.Value=enabled;
         GUI.enabled=state==1 && max>=1 && fg.Value && hasReflex;
         bool boost=GUILayout.Toggle(reflexBoost.Value,"NVIDIA Reflex On + Boost");
@@ -616,22 +654,24 @@ public sealed partial class NuclearDLSS : BaseUnityPlugin
         GUI.enabled=GUI.enabled && !(dyn!=0 && dynamic.Value);
         GUILayout.BeginHorizontal();
         for(int i=3;i<=Math.Min(max+1,6);i++)
-            if(GUILayout.Toggle(i==multiplier.Value,i+"×",GUI.skin.button) && i!=multiplier.Value) multiplier.Value=i;
+            if(GUILayout.Toggle(i==multiplier.Value,i+"Ã—",GUI.skin.button) && i!=multiplier.Value) multiplier.Value=i;
         GUILayout.EndHorizontal(); GUI.enabled=true;
         bool rates=GUILayout.Toggle(fpsOverlay.Value,"Show FPS while flying");
         if(rates!=fpsOverlay.Value) fpsOverlay.Value=rates;
         if(fg.Value && max>0 && !gameForeground) GUILayout.Label("Frame generation paused while the game is in the background");
         else if(fg.Value && max>0 && Time.timeScale<=0) GUILayout.Label("Frame generation paused with the simulation");
-        GUILayout.Label("DLSS evaluations  "+evals+"     Latest presents  "+presented);
+        if(vulkan)GUILayout.Label("FSR frames generated  "+vkGenerated);
+        else GUILayout.Label((FsrScaling?"FSR evaluations  ":"DLSS evaluations  ")+evals+"     Latest presents  "+presented);
         if(GUILayout.Button("Close (F8)")) SetMenu(false);
         GUI.DragWindow();
     }
     void OnDestroy() {
         SetMenu(false);
         if(earlyReflex) SetReflexLoop(false);
-        if(callback!=IntPtr.Zero) ReleaseReflexInput();
+
+        if(!vulkan && callback!=IntPtr.Zero) ReleaseReflexInput();
         RenderPipelineManager.beginFrameRendering-=RenderStart;
-        if(callback!=IntPtr.Zero) Issue(4,IntPtr.Zero);
+        if(!vulkan && callback!=IntPtr.Zero) Issue(4,IntPtr.Zero);
         if(patches!=null) patches.UnpatchSelf();
         if(menuHooks!=null) menuHooks.UnpatchSelf();
         Release(); self=null;

@@ -1,6 +1,7 @@
-param([Parameter(Mandatory)][string]$Game,[Parameter(Mandatory)][string]$Sdk,[Parameter(Mandatory)][string]$UnityHeaders,[Parameter(Mandatory)][string]$MinHook,[Parameter(Mandatory)][string]$FsrSdk)
+param([Parameter(Mandatory)][string]$Game,[Parameter(Mandatory)][string]$Sdk,[Parameter(Mandatory)][string]$UnityHeaders,[Parameter(Mandatory)][string]$MinHook,[Parameter(Mandatory)][string]$FsrSdk,[Parameter(Mandatory)][string]$VulkanHeaders)
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
+$VulkanHeaders=(Resolve-Path $VulkanHeaders).Path
 $Sdk=(Resolve-Path $Sdk).Path
 $UnityHeaders=(Resolve-Path $UnityHeaders).Path
 $MinHook=(Resolve-Path $MinHook).Path
@@ -27,19 +28,21 @@ $batch=Join-Path $scratch 'compile.cmd'
 @echo off
 call "$vs\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /EHsc /O2 /MT /LD /D_WINDOWS /I"$fsr" /I"$UnityHeaders" /I"$VulkanHeaders" "$root\src\Vulkan.cpp" /Fo"$scratch\Vulkan.obj" /link /OUT:"$native\GfxPluginNuclearFSR.dll" /IMPLIB:"$scratch\Vulkan.lib"
+if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /EHsc /O2 /MT /LD /D_WINDOWS /I"$fsr" /I"$Sdk\include" /I"$UnityHeaders" /I"$MinHook\include" /I"$scratch" "$root\src\Bridge.cpp" /Fo"$scratch\Bridge.obj" /link /OUT:"$native\NuclearDLSSBridge.dll" /IMPLIB:"$scratch\Bridge.lib" d3d12.lib dxgi.lib "$Sdk\lib\x64\sl.interposer.lib" /DELAYLOAD:sl.interposer.dll "$MinHook\lib\libMinHook.x64.lib" delayimp.lib user32.lib
 "@ | Set-Content $batch -Encoding ascii
 & $batch
 if($LASTEXITCODE){throw 'Native compilation failed'}
 $csc=(Get-ChildItem "$env:ProgramFiles/dotnet/sdk/*/Roslyn/bincore/csc.dll" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
 $refs=@('mscorlib','System','System.Core','netstandard','UnityEngine','UnityEngine.CoreModule','UnityEngine.IMGUIModule','UnityEngine.InputLegacyModule','UnityEngine.ScreenCaptureModule','UnityEngine.UIModule','UnityEngine.UI','Unity.TextMeshPro','Assembly-CSharp','Unity.RenderPipelines.Universal.Runtime','Unity.RenderPipelines.Core.Runtime') | ForEach-Object {"/reference:$managed/$_.dll"}
-& dotnet $csc /nologo /nostdlib+ /target:library /optimize+ "/out:$bin/NuclearOptionDLSS.dll" @refs "/reference:$core/BepInEx.dll" "/reference:$core/0Harmony.dll" "$root/src/Plugin.cs" "$root/src/GraphicsSettings.cs" "$root/src/FrameGenerationProvider.cs"
+& dotnet $csc /nologo /nostdlib+ /target:library /optimize+ "/out:$bin/NuclearOptionDLSS.dll" @refs "/reference:$core/BepInEx.dll" "/reference:$core/0Harmony.dll" "$root/src/Plugin.cs" "$root/src/Vulkan.cs" "$root/src/GraphicsSettings.cs" "$root/src/FrameGenerationProvider.cs"
 if($LASTEXITCODE){throw 'Managed compilation failed'}
 $rt=Join-Path $bin 'Runtime'
 New-Item -ItemType Directory -Force $rt | Out-Null
 Copy-Item "$Sdk/license.txt" "$rt/Streamline-license.txt"
 Copy-Item "$root/src/MinHook-license.txt" "$rt/MinHook-license.txt"
-foreach($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll') {
+foreach($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_loader_vk.dll','amd_fidelityfx_framegeneration_vk.dll','amd_fidelityfx_upscaler_dx12.dll','amd_fidelityfx_upscaler_vk.dll') {
     $file=Join-Path "$fsr/signedbin" $name
     $signature=Get-AuthenticodeSignature -LiteralPath $file
     if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Advanced Micro Devices') {throw "AMD signature verification failed for $name"}

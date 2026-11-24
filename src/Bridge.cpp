@@ -140,10 +140,13 @@ std::atomic<sl::FrameToken*> presentingToken{nullptr};
 void beforeGamePresent(sl::FrameToken* t);
 void afterGamePresent(sl::FrameToken* t,HRESULT hr);
 #include "FsrGeneration.h"
+#include "FsrUpscaler.h"
 FsrGeneration fsr;
+FsrUpscaler fsrScaler;
+ffxFunctions scaleApi{};
 bool preferFsr=false;
 std::atomic<bool> fsrPrimary{false};
-enum AdapterFeatures { detected=1, dlssSR=2, dlssFG=4, radeon=8, geforce=16 };
+enum AdapterFeatures { detected=1, dlssSR=2, dlssFG=4, radeon=8, geforce=16, fsrSR=32 };
 std::atomic<int> adapterFeatures{0};
 #include "GamePresentation.h"
 constexpr int noMode = -2;
@@ -238,6 +241,11 @@ void init() {
     started=true;
 
     kernels.initialize(device);
+    const auto loaderPath=std::filesystem::path(libraryPath)/L"amd_fidelityfx_loader_dx12.dll";
+    if(auto module=LoadLibraryExW(loaderPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32)){
+        ffxLoadFunctions(&scaleApi,module);
+        if(fsrScaler.available(scaleApi,device))adapterFeatures.fetch_or(fsrSR);
+    }
     if(adapterFeatures.load()&dlssSR) {
         void *before=nullptr,*after=nullptr;
         check(slGetFeatureFunction(sl::kFeatureCommon,"slHookPresent",before),"Common present hook");
@@ -313,10 +321,13 @@ sl::FrameToken* configureDLSS(const Frame& f) {
 }
 void scene(Packet& packet) {
     if(manualFrame){afterPresent(0); manualFrame=false;}
-    if(!(adapterFeatures.load()&dlssSR)) packet.f.mode=0;
+        bool fsrScaling=(packet.f.flags&16)!=0;
+    if(!(adapterFeatures.load()&(fsrScaling?fsrSR:dlssSR)))packet.f.mode=0;
     const auto& f=packet.f;
     if(!f.generated) suspendOutput();
-    auto* t=(adapterFeatures.load()&dlssSR)?configureDLSS(f):nullptr;
+        Frame nvidia=f;
+    if(fsrScaling)nvidia.mode=0;
+    auto* t=(adapterFeatures.load()&dlssSR)?configureDLSS(nvidia):nullptr;
     auto& s=begin();
     constexpr auto rgba=DXGI_FORMAT_R16G16B16A16_FLOAT, rg=DXGI_FORMAT_R16G16_FLOAT, r=DXGI_FORMAT_R32_FLOAT;
     struct Parameters {float matrix[16]; int width,height,reset,cockpit; float planes[4],jitter[2];} params{};
@@ -335,10 +346,35 @@ void scene(Packet& packet) {
         {&motion,sl::kBufferTypeMotionVectors,sl::eValidUntilPresent},
         {&color,sl::kBufferTypeScalingInputColor,sl::eValidUntilEvaluate},
         {&out,sl::kBufferTypeScalingOutputColor,sl::eValidUntilEvaluate}};
-    if(t) check(slSetTagForFrame(*t,view,tags,f.mode?4:2,s.list.Get()),"Scene textures");
+    if(t) check(slSetTagForFrame(*t,view,tags,nvidia.mode?4:2,s.list.Get()),"Scene textures");
     if(f.mode) {
-        const sl::BaseStructure* inputs[]={&view};
-        check(slEvaluateFeature(sl::kFeatureDLSS,*t,inputs,1,s.list.Get()),"DLSS evaluation");
+        if(fsrScaling){
+            ffxCreateBackendDX12Desc backend{{FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12},device};
+            ffxDispatchDescUpscale frame{{FFX_API_DISPATCH_DESC_TYPE_UPSCALE}};
+            frame.commandList=s.list.Get();frame.renderSize={UINT(f.width),UINT(f.height)};
+            frame.upscaleSize={UINT(f.outWidth),UINT(f.outHeight)};
+            frame.color=ffxApiGetResourceDX12(split?f.worldInput:f.color);
+            frame.depth=ffxApiGetResourceDX12(split?f.depth:f.mergedDepth);
+            frame.motionVectors=ffxApiGetResourceDX12(split?f.worldMotion:f.backwardMotion);
+            frame.output=ffxApiGetResourceDX12(f.output,FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+            frame.color.description.format=frame.output.description.format=FFX_API_SURFACE_FORMAT_R16G16B16A16_FLOAT;
+            frame.depth.description.format=FFX_API_SURFACE_FORMAT_R32_FLOAT;
+            frame.motionVectors.description.format=FFX_API_SURFACE_FORMAT_R16G16_FLOAT;
+            frame.jitterOffset={f.jitterX,f.jitterY};frame.motionVectorScale={float(f.width),float(f.height)};
+            frame.frameTimeDelta=f.frameTimeMs;frame.reset=f.reset;frame.cameraNear=f.nearZ;frame.cameraFar=f.farZ;frame.cameraFovAngleVertical=f.fov;
+            auto wait=[](){
+                ComPtr<ID3D12Fence> fence;
+                check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)),"FSR resize fence");
+                check(unity->GetCommandQueue()->Signal(fence.Get(),1),"Signal FSR resize");
+                check(fence->SetEventOnCompletion(1,nullptr),"Wait for FSR resize");
+            };
+            if(!fsrScaler.dispatch(scaleApi,backend.header,frame,wait)){
+                adapterFeatures.fetch_and(~fsrSR);report("FSR upscaling unavailable; restoring game resolution");
+            }
+        }else{
+            const sl::BaseStructure* inputs[]={&view};
+            check(slEvaluateFeature(sl::kFeatureDLSS,*t,inputs,1,s.list.Get()),"DLSS evaluation");
+        }
         D3D12_RESOURCE_BARRIER b{}; b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV; b.UAV.pResource=f.output;
         s.list->ResourceBarrier(1,&b); ++evaluations;lastEvaluation=f.index;
     }
@@ -469,7 +505,7 @@ void UNITY_INTERFACE_API deviceEvent(UnityGfxDeviceEventType e) {
     if(e==kUnityGfxDeviceEventShutdown && started) {
         ready=-1; reflexReady=false; srMode=0; lastEvaluation=-1;
         try{suspendOutput();fsr.shutdown();}catch(const std::exception& ex){trace(ex.what());}
-        fsrPrimary=false;slots.clear();
+        fsrScaler.release(scaleApi);fsrPrimary=false;slots.clear();
         if(pluginsInitialized) {slShutdown();pluginsInitialized=false;}
         commonPresent=nullptr;afterPresent=nullptr;manualFrame=false;primary=false;
         adapterFeatures=0;maxGenerated=0;dynamicMfg=0;started=runtimeInitialized=false;

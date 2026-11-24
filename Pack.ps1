@@ -8,9 +8,14 @@ $plugin = 'BepInEx/plugins/NuclearOptionDLSS'
 $files = [ordered]@{}
 foreach ($relative in @(
     'BepInEx/patchers/NuclearOptionDLSS/NuclearOptionDLSS.Preloader.dll'
+    'NuclearOption_Data/Plugins/x86_64/GfxPluginNuclearFSR.dll'
     'NuclearOption_Data/Plugins/x86_64/NuclearDLSSBridge.dll'
     "$plugin/NuclearOptionDLSS.dll"
     "$plugin/FrameGeneration.Credits.dll"
+    "$plugin/Runtime/amd_fidelityfx_upscaler_vk.dll"
+    "$plugin/Runtime/amd_fidelityfx_upscaler_dx12.dll"
+    "$plugin/Runtime/amd_fidelityfx_loader_vk.dll"
+    "$plugin/Runtime/amd_fidelityfx_framegeneration_vk.dll"
     "$plugin/Runtime/amd_fidelityfx_loader_dx12.dll"
     "$plugin/Runtime/amd_fidelityfx_framegeneration_dx12.dll"
     "$plugin/Runtime/FidelityFX-license.txt"
@@ -20,14 +25,14 @@ foreach ($relative in @(
     $files[$relative] = Join-Path $package $relative
 }
 $files["$plugin/README.md"] = Join-Path $PSScriptRoot 'README.md'
-foreach ($name in 'README.md','FidelityFX-third-party.md','Streamline-third-party.md','Streamline-headers.txt','Unity-Companion.txt') {
+foreach ($name in 'README.md','FidelityFX-third-party.md','Streamline-third-party.md','Streamline-headers.txt','Unity-Companion.txt','Vulkan-Headers.txt') {
     $files["$plugin/Notices/$name"] = Join-Path $PSScriptRoot "notices/$name"
 }
 foreach ($path in $files.Values) {
     if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing release file: $path" }
 }
 
-$destination = Join-Path $PSScriptRoot 'NuclearOption-FrameGeneration-0.4.2-win-x64.zip'
+$destination = Join-Path $PSScriptRoot 'NuclearOption-FrameGeneration-0.5.0-win-x64.zip'
 $temporary = Join-Path $PSScriptRoot ([Guid]::NewGuid().ToString('N') + '.tmp')
 try {
     $archive = [IO.Compression.ZipFile]::Open($temporary, [IO.Compression.ZipArchiveMode]::Create)

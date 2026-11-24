@@ -21,6 +21,7 @@ public static class NuclearOptionGraphicsPreloader
     {
         if (IntPtr.Size != 8 || !String.Equals(Path.GetFileName(Paths.ExecutablePath),
                 "NuclearOption.exe", StringComparison.OrdinalIgnoreCase)) return;
+        if(Array.Exists(Environment.GetCommandLineArgs(), a=>String.Equals(a,"-force-vulkan",StringComparison.OrdinalIgnoreCase)))return;
         string bridge = Path.Combine(Paths.GameRootPath, "NuclearOption_Data", "Plugins", "x86_64", "NuclearDLSSBridge.dll");
         IntPtr module = LoadLibraryEx(bridge, IntPtr.Zero, 0x1100);
         if (module == IntPtr.Zero) return;

@@ -5,7 +5,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
-[BepInPlugin("local.nuclearoption.framegeneration.credits", "Frame Generation Credits", "0.4.2")]
+[BepInPlugin("local.nuclearoption.framegeneration.credits", "Frame Generation Credits", "0.5.0")]
 [BepInDependency("local.nuclearoption.dlss")]
 public sealed class FrameGenerationCredits : BaseUnityPlugin
 {

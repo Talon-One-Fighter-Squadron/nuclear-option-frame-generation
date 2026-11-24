@@ -20,7 +20,7 @@ public sealed partial class NuclearDLSS
     static void ResetDLSSSettings() {
         var p=self;
         if(!p) return;
-        p.quality.Value=Quality.DLAA;p.nativePanel.Value=true;p.forceSecondGen.Value=false;
+        p.quality.Value=Quality.DLAA;p.fsrQuality.Value=FsrPreset.Off;p.preferFsrScaling.Value=false;p.nativePanel.Value=true;p.forceSecondGen.Value=false;
         p.fg.Value=false;p.mfg.Value=false;p.dynamic.Value=false;p.multiplier.Value=3;p.fpsOverlay.Value=false;p.reflexBoost.Value=false;
         p.capToRefresh.Value=false;p.provider.Value="";
     }
@@ -31,7 +31,7 @@ public sealed partial class NuclearDLSS
             // Reuse the stock two-column section inside the Graphics scroll view.
             var columns=___aaDropdown.transform.parent.parent.parent;
             section=Instantiate(columns.gameObject,columns.parent,false);
-            section.name="NVIDIA DLSS Settings";
+            section.name="Upscaling and Frame Generation";
             section.transform.SetSiblingIndex(columns.GetSiblingIndex());
             var view=section.AddComponent<NativeGraphicsSettings>();
             view.Build(self,___aaDropdown,___vsyncToggle);
@@ -45,7 +45,7 @@ public sealed partial class NuclearDLSS
 
     sealed class NativeGraphicsSettings : MonoBehaviour {
         NuclearDLSS mod;
-        TMP_Dropdown preset,model,factor,reflex,provider;
+        TMP_Dropdown scaler,preset,model,factor,reflex,provider;
         Toggle gen,multi,instruments,rates;
         Toggle refreshCap;
         TMP_Text refreshLabel;
@@ -94,11 +94,12 @@ public sealed partial class NuclearDLSS
             return control;
         }
         public void Build(NuclearDLSS p,TMP_Dropdown dropdown,Toggle checkbox) {
-            var left=PrepareColumn(transform.GetChild(0),"NVIDIA DLSS");
+            var left=PrepareColumn(transform.GetChild(0),"UPSCALING");
             var right=PrepareColumn(transform.GetChild(1),"FRAME GENERATION");
             srNote=Note(left);fgNote=Note(right);
+            scaler=Dropdown(dropdown,left,"UPSCALER",new[]{"NVIDIA DLSS","AMD FSR 3.1"},i=>p.preferFsrScaling.Value=i==1);
             preset=Dropdown(dropdown,left,"SUPER RESOLUTION",new[]{"Off","DLAA (Native)","Quality","Balanced","Performance","Ultra Performance"},
-                i=>p.quality.Value=modes[i]);
+                p.SelectQuality);
             model=Dropdown(dropdown,left,"DLSS MODEL",new[]{"NVIDIA Recommended","DLSS 4.5 (M / L)"},i=>p.forceSecondGen.Value=i==1);
             instruments=Checkbox(checkbox,left,"Native Instruments",v=>p.nativePanel.Value=v);
             reflex=Dropdown(dropdown,left,"NVIDIA REFLEX",new[]{"On","On + Boost"},i=>p.reflexBoost.Value=i==1);
@@ -126,7 +127,11 @@ public sealed partial class NuclearDLSS
         void LateUpdate(){if(mod)Refresh();}
         void Refresh() {
             bool ready=mod.state==1;
-            ShowNote(srNote,ready?(mod.CanUpscale?null:"DLSS Super Resolution unavailable on this GPU or driver"):mod.status);
+            scaler.SetValueWithoutNotify(mod.FsrScaling?1:0);
+            scaler.interactable=ready && mod.HasDlssScaling && mod.HasFsrScaling;
+            string native=mod.FsrScaling?"Native AA":"DLAA (Native)";
+            if(preset.options[1].text!=native){preset.options[1].text=native;preset.RefreshShownValue();}
+            ShowNote(srNote,ready?(mod.CanUpscale?null:"No compatible upscaler available"):mod.status);
             ShowNote(fgNote,mod.ProviderNote);
             provider.SetValueWithoutNotify(mod.ProviderIndex(mod.provider.Value));
             provider.interactable=ready && mod.CanSelectDLSS;
@@ -153,7 +158,8 @@ public sealed partial class NuclearDLSS
             instruments.SetIsOnWithoutNotify(mod.nativePanel.Value);gen.SetIsOnWithoutNotify(mod.fg.Value);
             multi.SetIsOnWithoutNotify(mod.mfg.Value);rates.SetIsOnWithoutNotify(mod.fpsOverlay.Value);
             preset.interactable=ready && mod.CanUpscale;
-            model.interactable=instruments.interactable=ready && mod.ActiveQuality!=Quality.Off;
+            model.interactable=ready && !mod.FsrScaling && mod.ActiveQuality!=Quality.Off;
+            instruments.interactable=ready && !mod.vulkan && mod.ActiveQuality!=Quality.Off;
             gen.interactable=ready && mod.max>0;
             multi.interactable=gen.interactable && mod.fg.Value && mod.max>1;
             factor.interactable=multi.interactable && mod.mfg.Value;

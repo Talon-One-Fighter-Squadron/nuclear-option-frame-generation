@@ -1,13 +1,16 @@
 # Frame Generation for Nuclear Option
 
-Adds frame generation to the game's **Settings → Graphics** menu. On GeForce RTX cards you can also run DLSS Super Resolution or DLAA and keep the cockpit instruments at display resolution.
+Adds FSR 3.1 temporal upscaling and 2× frame generation to Nuclear Option on Vulkan and DirectX 12. You can change each in **Settings → Graphics**. DirectX 12 also supports optional DLSS and Reflex on compatible GeForce cards.
 
 ## Install
 
 1. Close Nuclear Option. In your Steam library, right-click the game and choose **Manage → Browse local files**.
 2. Install **BepInEx 5 for Windows x64** in that folder if you haven't already. Version 5.4.23.5 was used for testing. [BepInEx download](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5)
-3. Extract the mod ZIP directly beside `NuclearOption.exe`. Allow the `BepInEx` and `NuclearOption_Data` folders to merge. FSR 2× is included. For DLSS, Reflex or Multi Frame Generation, add NVIDIA’s runtime as described below before starting the game. [Download the mod ZIP](https://github.com/Talon-One-Fighter-Squadron/nuclear-option-frame-generation/releases/download/v0.4.2/NuclearOption-FrameGeneration-0.4.2-win-x64.zip)
-4. Launch the game with Steam's **DirectX 12** option. Open **Settings → Graphics** and enable **Frame Generation**. Press **F8** in flight to check the active provider and see rendered and presented FPS.
+3. Extract the mod ZIP directly beside `NuclearOption.exe`. Allow the `BepInEx` and `NuclearOption_Data` folders to merge. FSR 2× is included. For DLSS, Reflex or Multi Frame Generation, add NVIDIA’s runtime as described below before starting the game. [Download the mod ZIP](https://github.com/Talon-One-Fighter-Squadron/nuclear-option-frame-generation/releases/download/v0.5.0/NuclearOption-FrameGeneration-0.5.0-win-x64.zip)
+4. Choose **Vulkan** or **DirectX 12** in Steam. On the first Vulkan launch the mod adds its graphics startup entry to `NuclearOption_Data/boot.config`. Restart once with the same Steam option to activate Vulkan frame generation. A game update that replaces that file may require the same restart.
+5. Open **Settings → Graphics**. Select **AMD FSR 3.1** under **Upscaler**, then choose **Quality**, **Balanced**, **Performance**, **Ultra Performance** or **Native AA**. **Off** keeps the game’s own resolution. Toggle **Frame Generation** separately for 2× output. **F8** opens the same controls in flight.
+
+Vulkan uses the AMD upscaler and frame-generation runtime on supported GPUs. The native-resolution cockpit option, NVIDIA features, and Reflex-based refresh cap use DirectX 12. If another plug-in already owns the Vulkan startup entry, the mod keeps that entry and reports the conflict in Graphics.
 
 ### Add DLSS and Reflex
 
@@ -40,7 +43,7 @@ Adds frame generation to the game's **Settings → Graphics** menu. On GeForce R
 | GeForce RTX 20 or 30 series | FSR 2×. Add the NVIDIA runtime for DLSS Super Resolution or DLAA. |
 | GeForce RTX 40 series | FSR 2×. Add the NVIDIA runtime for DLSS 2×. |
 | GeForce RTX 50 series | FSR 2×. Add the NVIDIA runtime for DLSS 2× and Multi Frame Generation. |
-| Compatible Radeon | FSR 2×, using the game's own rendering resolution |
+| Compatible Radeon | FSR 2× with native rendering or FSR 3.1 upscaling |
 
 The mod picks a provider on first launch. You can toggle frame generation during flight. Switching between DLSS and FSR takes a restart because the provider owns the game's presentation buffers. On NVIDIA, the available multipliers depend on the GPU and driver.
 
@@ -48,25 +51,28 @@ DLSS includes DLAA, Quality, Balanced, Performance and Ultra Performance. With N
 
 ### Uninstall
 
-Close the game and remove these three paths. You can keep your preferences for a later install.
+Close the game and remove these four paths. You can keep your preferences for a later install.
 
 ```text
 BepInEx/plugins/NuclearOptionDLSS/
 BepInEx/patchers/NuclearOptionDLSS/
 NuclearOption_Data/Plugins/x86_64/NuclearDLSSBridge.dll
+NuclearOption_Data/Plugins/x86_64/GfxPluginNuclearFSR.dll
 ```
+
+If you used Vulkan, remove the line `xrsdk-pre-init-library=GfxPluginNuclearFSR` from `NuclearOption_Data/boot.config`.
 
 ## Build
 
-Use a Windows x64 installation of Nuclear Option with BepInEx 5, Visual Studio C++ Build Tools, the Windows SDK shader compiler and a .NET SDK. The native bridge uses Streamline 2.14.16, AMD FSR SDK 2.4.0, MinHook 1.3.4 (x64 static library) and Unity's native rendering plugin headers. The build scripts write to `Package/`. The packaging script selects the public release files and adds the README and notices.
+Use a Windows x64 installation of Nuclear Option with BepInEx 5, Visual Studio C++ Build Tools, the Windows SDK shader compiler and a .NET SDK. The native bridge uses Streamline 2.14.16, AMD FSR SDK 2.4.0, MinHook 1.3.4 (x64 static library) Unity’s native rendering plugin headers and Vulkan-Headers 1.3.239. Set `$vulkanHeaders` to the Vulkan-Headers `include` directory. The build scripts write to `Package/`. The packaging script selects the public release files and adds the README and notices.
 
 ```powershell
-.\Build.ps1 -Game $game -Sdk $streamline -UnityHeaders $unityHeaders -MinHook $minHook -FsrSdk $fsrSdk
+.\Build.ps1 -Game $game -Sdk $streamline -UnityHeaders $unityHeaders -MinHook $minHook -FsrSdk $fsrSdk -VulkanHeaders $vulkanHeaders
 .\credits\Build.ps1 -Game $game
 .\Pack.ps1
 ```
 
-The [dependency notes](notices/README.md) link to the exact SDK releases. Version 0.4.2 was tested with Nuclear Option 0.34.6. Game updates can change the rendering hooks.
+The [dependency notes](notices/README.md) link to the exact SDK releases. This build targets Nuclear Option 0.34.6. Vulkan startup and AMD swapchain initialization were checked on a GeForce RTX 5080. The new upscaling presets and combined output have not been verified in flight or on Radeon hardware. Game updates can change the rendering hooks.
 
 ## Game credit
 
