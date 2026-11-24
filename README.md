@@ -7,8 +7,13 @@ Adds FSR 3.1 temporal upscaling and 2× frame generation to Nuclear Option on Vu
 1. Close Nuclear Option. In your Steam library, right-click the game and choose **Manage → Browse local files**.
 2. If this is a fresh install, extract **BepInEx 5.4.23.5 for Windows x64** here first. You should see `winhttp.dll` beside `NuclearOption.exe`. [Download BepInEx for Windows x64](https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/BepInEx_win_x64_5.4.23.5.zip)
 3. Extract the mod ZIP directly beside `NuclearOption.exe`. Allow the `BepInEx` and `NuclearOption_Data` folders to merge. FSR 2× is included. For DLSS, Reflex or Multi Frame Generation, add NVIDIA’s runtime as described below before starting the game. [Public releases](https://github.com/Talon-One-Fighter-Squadron/nuclear-option-frame-generation/releases)
-4. Choose **Vulkan** or **DirectX 12** in Steam. On the first Vulkan launch the mod adds its graphics startup entry to `NuclearOption_Data/boot.config`. Restart once with the same Steam option to activate Vulkan frame generation. A game update that replaces that file may require the same restart.
-5. Open **Settings → Graphics**. Select **AMD FSR 3.1** under **Upscaler**, then choose **Quality**, **Balanced**, **Performance**, **Ultra Performance** or **Native AA**. **Off** keeps the game’s own resolution. Toggle **Frame Generation** separately for 2× output. **F8** opens the same controls in flight.
+4. In your **Steam Library**, right-click **Nuclear Option** and choose **Properties → General**. Under **Launch Options**, open the **Selected Launch Option** dropdown. Steam supplies the graphics launch flag for you. If you previously typed a graphics flag such as `-dx12`, `-force-d3d12`, or `-force-vulkan` in the text box below, remove that flag before switching renderers.
+
+   - **DLSS** — select **Play Nuclear Option (DirectX 12)**. DLSS Super Resolution works on GeForce RTX 20 series and newer. **NVIDIA DLSS Frame Generation** requires an **RTX 40 or 50 series** GPU. **Multi Frame Generation** requires an **RTX 50 series** GPU.
+   - **FSR 3.1 and FSR 2x Frame Generation** — select **Play Nuclear Option (Vulkan)**. FSR 2x also works on compatible Radeon cards and GeForce RTX 20 and 30 series cards.
+
+5. Close Properties and click **Play**. On your first Vulkan launch, reach the main menu, exit the game, and click **Play** again with Vulkan selected. This activates the mod's frame-generation startup plug-in.
+6. Open **Settings → Graphics** (or press **F8** in flight). Under **Upscaler**, select **NVIDIA DLSS** or **AMD FSR 3.1** and choose a quality preset. Enable **Frame Generation** separately if you want it.
 
 Vulkan uses the AMD upscaler and frame-generation runtime on supported GPUs. The native-resolution cockpit option, NVIDIA features, and Reflex-based refresh cap use DirectX 12. If another plug-in already owns the Vulkan startup entry, the mod keeps that entry and reports the conflict in Graphics.
 
