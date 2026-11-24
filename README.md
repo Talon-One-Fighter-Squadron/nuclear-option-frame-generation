@@ -79,6 +79,12 @@ Use a Windows x64 installation of Nuclear Option with BepInEx 5, Visual Studio C
 
 The [dependency notes](notices/README.md) link to the exact SDK releases. This build targets Nuclear Option 0.34.6. Game updates can change the rendering hooks.
 
+## License
+
+The original mod code is available under the [MIT License](LICENSE). You can fork, modify, and distribute it, including commercially. Keep the copyright and license notice with copies or substantial portions of the code.
+
+Nuclear Option and its assets belong to Shockfront Studios. Third-party components are covered by their [own licenses and notices](notices/README.md).
+
 ## Game credit
 
 This project is an unofficial community modification and is not affiliated with, sponsored by, or endorsed by Shockfront Studios Pty Ltd. Original Nuclear Option assets, vehicle designs, audio, and code are Copyright (c) 2026 Shockfront Studios Pty Ltd. All rights reserved. Nuclear Option and Shockfront Studios are trademarks or registered trademarks of Shockfront Studios Pty Ltd. Original mod content and all other trademarks belong to their respective owners.

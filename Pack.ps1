@@ -30,6 +30,7 @@ foreach ($relative in @(
     $files[$relative] = Join-Path $package $relative
 }
 $files["$plugin/README.md"] = Join-Path $PSScriptRoot 'README.md'
+$files["$plugin/LICENSE"] = Join-Path $PSScriptRoot 'LICENSE'
 foreach ($name in 'README.md','FidelityFX-third-party.md','Streamline-third-party.md','Streamline-headers.txt','Unity-Companion.txt','Vulkan-Headers.txt') {
     $files["$plugin/Notices/$name"] = Join-Path $PSScriptRoot "notices/$name"
 }
